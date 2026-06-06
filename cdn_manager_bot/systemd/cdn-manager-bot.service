@@ -1,0 +1,19 @@
+[Unit]
+Description=CDN Manager Bot - Cloudflare DNS Telegram Manager
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/local/cdn-manager/cdn_manager_bot
+ExecStart=/usr/local/cdn-manager/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cdn-manager-bot
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

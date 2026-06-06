@@ -1,0 +1,652 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  cdn — CDN Manager Bot management command
+#  Installed at /usr/bin/cdn
+# =============================================================================
+
+set -euo pipefail
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+VERSION="1.0.1"
+INSTALL_DIR="/usr/local/cdn-manager"
+BOT_DIR="${INSTALL_DIR}/cdn_manager_bot"
+VENV_DIR="${INSTALL_DIR}/venv"
+ENV_FILE="${BOT_DIR}/.env"
+SERVICE_NAME="cdn-manager-bot"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+CDN_CMD="/usr/bin/cdn"
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+separator() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+}
+
+thin_separator() {
+    echo -e "${CYAN}────────────────────────────────────────────────────────────${RESET}"
+}
+
+pause() {
+    echo ""
+    read -rp "  Press Enter to continue..."
+}
+
+require_root() {
+    [[ $EUID -eq 0 ]] || { echo -e "${RED}[ERROR]${RESET} Please run as root."; exit 1; }
+}
+
+# ── Status helpers ─────────────────────────────────────────────────────────────
+
+bot_status_text() {
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        echo -e "${GREEN}Running${RESET}"
+    else
+        echo -e "${RED}Stopped${RESET}"
+    fi
+}
+
+autostart_status_text() {
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        echo -e "${GREEN}Enabled${RESET}"
+    else
+        echo -e "${RED}Disabled${RESET}"
+    fi
+}
+
+is_installed() {
+    [[ -d "${INSTALL_DIR}" ]] && [[ -f "${ENV_FILE}" ]]
+}
+
+# ── Main menu ─────────────────────────────────────────────────────────────────
+
+show_main_menu() {
+    clear
+    separator
+    echo -e "  ${BOLD}${CYAN}CDN Manager Bot Script ( v${VERSION} )${RESET}"
+    separator
+    echo ""
+    echo -e "  ${BOLD}0.${RESET}  Exit"
+    echo -e "  ${BOLD}1.${RESET}  Install"
+    echo -e "  ${BOLD}2.${RESET}  Update"
+    echo -e "  ${BOLD}3.${RESET}  Install Specific Version"
+    echo -e "  ${BOLD}4.${RESET}  Uninstall"
+    echo -e "  ${BOLD}5.${RESET}  Service Manager"
+    echo -e "  ${BOLD}6.${RESET}  Start Bot"
+    echo -e "  ${BOLD}7.${RESET}  Stop Bot"
+    echo -e "  ${BOLD}8.${RESET}  Restart Bot"
+    echo -e "  ${BOLD}9.${RESET}  View Logs"
+    echo -e "  ${BOLD}10.${RESET} Config Manager"
+    echo -e "  ${BOLD}11.${RESET} Help"
+    echo ""
+    thin_separator
+    echo -e "  Bot Status : $(bot_status_text)"
+    echo -e "  Auto Start : $(autostart_status_text)"
+    thin_separator
+    echo ""
+    read -rp "  Please enter a number [0-11]: " MAIN_CHOICE
+}
+
+# ── 1. Install ────────────────────────────────────────────────────────────────
+
+do_install() {
+    require_root
+    if is_installed; then
+        echo ""
+        echo -e "  ${YELLOW}[WARN]${RESET} CDN Manager Bot is already installed at ${INSTALL_DIR}."
+        echo -e "  Use option ${BOLD}2${RESET} to update or option ${BOLD}4${RESET} to uninstall first."
+        pause
+        return
+    fi
+    bash "${INSTALL_DIR}/install.sh" 2>/dev/null || bash "$(dirname "${CDN_CMD}")/install.sh" 2>/dev/null || {
+        # fallback: look for install.sh next to this script
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        bash "${SCRIPT_DIR}/install.sh"
+    }
+    pause
+}
+
+# ── 2. Update ─────────────────────────────────────────────────────────────────
+
+do_update() {
+    require_root
+
+    echo ""
+    separator
+    echo -e "  ${BOLD}${CYAN}Update CDN Manager Bot${RESET}"
+    separator
+    echo ""
+
+    if ! is_installed; then
+        echo -e "  ${RED}[ERROR]${RESET} Bot is not installed. Use option 1 to install."
+        pause
+        return
+    fi
+
+    if [[ ! -d "${INSTALL_DIR}/.git" ]]; then
+        echo -e "  ${RED}[ERROR]${RESET} Git repository not found at ${INSTALL_DIR}."
+        echo -e "  Cannot auto-update without git history."
+        pause
+        return
+    fi
+
+    echo -e "  ${CYAN}Fetching latest changes from remote...${RESET}"
+    cd "${INSTALL_DIR}"
+    git fetch --all --tags
+
+    LATEST_TAG=$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || echo "")
+    CURRENT_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short HEAD)
+
+    echo -e "  Current version : ${YELLOW}${CURRENT_TAG}${RESET}"
+    echo -e "  Latest version  : ${GREEN}${LATEST_TAG:-unknown}${RESET}"
+    echo ""
+
+    if [[ -n "${LATEST_TAG}" && "${CURRENT_TAG}" == "${LATEST_TAG}" ]]; then
+        echo -e "  ${GREEN}Already on the latest version.${RESET}"
+        pause
+        return
+    fi
+
+    if [[ -n "${LATEST_TAG}" ]]; then
+        echo -e "  ${CYAN}Updating to ${LATEST_TAG}...${RESET}"
+        git checkout "${LATEST_TAG}"
+    else
+        echo -e "  ${CYAN}Pulling latest commits...${RESET}"
+        git pull
+    fi
+
+    echo -e "  ${CYAN}Installing updated dependencies...${RESET}"
+    "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
+    "${VENV_DIR}/bin/pip" install --quiet -r "${BOT_DIR}/requirements.txt"
+
+    echo -e "  ${CYAN}Restarting service...${RESET}"
+    systemctl restart "${SERVICE_NAME}"
+
+    echo ""
+    echo -e "  ${GREEN}✅  Update complete.${RESET}"
+    pause
+}
+
+# ── 3. Install Specific Version ───────────────────────────────────────────────
+
+do_install_version() {
+    require_root
+
+    echo ""
+    separator
+    echo -e "  ${BOLD}${CYAN}Install Specific Version${RESET}"
+    separator
+    echo ""
+    echo -e "  ${YELLOW}Available versions are Git tags, for example:${RESET}"
+    echo -e "  ${CYAN}1.0.0 / 1.1.0 / 2.0.0${RESET}"
+    echo ""
+
+    if [[ ! -d "${INSTALL_DIR}/.git" ]]; then
+        echo -e "  ${RED}[ERROR]${RESET} Git repository not found at ${INSTALL_DIR}."
+        echo -e "  Install the bot first, then use this option to switch versions."
+        pause
+        return
+    fi
+
+    cd "${INSTALL_DIR}"
+    echo -e "  ${CYAN}Fetching all tags from remote...${RESET}"
+    git fetch --tags --quiet
+
+    echo ""
+    echo -e "  ${BOLD}Available versions:${RESET}"
+    git tag --sort=-version:refname | head -20 | while read -r tag; do
+        echo -e "    ${YELLOW}${tag}${RESET}"
+    done
+    echo ""
+
+    read -rp "  Enter version (tag): " TARGET_VERSION
+    TARGET_VERSION="${TARGET_VERSION// /}"
+
+    if [[ -z "${TARGET_VERSION}" ]]; then
+        echo -e "  ${RED}[ERROR]${RESET} Version cannot be empty."
+        pause
+        return
+    fi
+
+    # Verify the tag exists
+    if ! git rev-parse "refs/tags/${TARGET_VERSION}" &>/dev/null; then
+        echo -e "  ${RED}[ERROR]${RESET} Tag '${TARGET_VERSION}' not found."
+        pause
+        return
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}Switching to version ${TARGET_VERSION}...${RESET}"
+    git checkout "${TARGET_VERSION}"
+
+    echo -e "  ${CYAN}Installing dependencies for ${TARGET_VERSION}...${RESET}"
+    "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
+    "${VENV_DIR}/bin/pip" install --quiet -r "${BOT_DIR}/requirements.txt"
+
+    echo -e "  ${CYAN}Restarting service...${RESET}"
+    systemctl restart "${SERVICE_NAME}"
+
+    echo ""
+    echo -e "  ${GREEN}✅  Switched to version ${TARGET_VERSION}.${RESET}"
+    pause
+}
+
+# ── 4. Uninstall ──────────────────────────────────────────────────────────────
+
+do_uninstall() {
+    require_root
+    bash "${INSTALL_DIR}/uninstall.sh"
+    pause
+}
+
+# ── 5. Service Manager ────────────────────────────────────────────────────────
+
+do_service_manager() {
+    require_root
+    while true; do
+        clear
+        separator
+        echo -e "  ${BOLD}${CYAN}Service Manager${RESET}"
+        separator
+        echo ""
+        echo -e "  ${BOLD}1.${RESET} Enable Auto Start"
+        echo -e "  ${BOLD}2.${RESET} Disable Auto Start"
+        echo -e "  ${BOLD}3.${RESET} Start Service"
+        echo -e "  ${BOLD}4.${RESET} Stop Service"
+        echo -e "  ${BOLD}5.${RESET} Restart Service"
+        echo -e "  ${BOLD}6.${RESET} Service Status"
+        echo -e "  ${BOLD}7.${RESET} Back"
+        echo ""
+        thin_separator
+        echo -e "  Bot Status : $(bot_status_text)"
+        echo -e "  Auto Start : $(autostart_status_text)"
+        thin_separator
+        echo ""
+        read -rp "  Please enter a number [1-7]: " SVC_CHOICE
+
+        case "${SVC_CHOICE}" in
+            1)
+                systemctl enable "${SERVICE_NAME}"
+                echo -e "  ${GREEN}✅  Auto start enabled.${RESET}"
+                pause
+                ;;
+            2)
+                systemctl disable "${SERVICE_NAME}"
+                echo -e "  ${YELLOW}⚠️   Auto start disabled.${RESET}"
+                pause
+                ;;
+            3)
+                systemctl start "${SERVICE_NAME}"
+                echo -e "  ${GREEN}✅  Service started.${RESET}"
+                pause
+                ;;
+            4)
+                systemctl stop "${SERVICE_NAME}"
+                echo -e "  ${YELLOW}⚠️   Service stopped.${RESET}"
+                pause
+                ;;
+            5)
+                systemctl restart "${SERVICE_NAME}"
+                echo -e "  ${GREEN}✅  Service restarted.${RESET}"
+                pause
+                ;;
+            6)
+                echo ""
+                systemctl status "${SERVICE_NAME}" --no-pager || true
+                pause
+                ;;
+            7)
+                break
+                ;;
+            *)
+                echo -e "  ${RED}Invalid option.${RESET}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ── 6-8. Start / Stop / Restart ───────────────────────────────────────────────
+
+do_start() {
+    require_root
+    systemctl start "${SERVICE_NAME}"
+    echo -e "  ${GREEN}✅  Bot started.${RESET}"
+    pause
+}
+
+do_stop() {
+    require_root
+    systemctl stop "${SERVICE_NAME}"
+    echo -e "  ${YELLOW}⚠️   Bot stopped.${RESET}"
+    pause
+}
+
+do_restart() {
+    require_root
+    systemctl restart "${SERVICE_NAME}"
+    echo -e "  ${GREEN}✅  Bot restarted.${RESET}"
+    pause
+}
+
+# ── 9. View Logs ──────────────────────────────────────────────────────────────
+
+do_view_logs() {
+    echo ""
+    separator
+    echo -e "  ${BOLD}${CYAN}View Logs${RESET}"
+    separator
+    echo ""
+    echo -e "  ${BOLD}1.${RESET} Live journal logs   (journalctl -f)"
+    echo -e "  ${BOLD}2.${RESET} Last 100 journal lines"
+    echo -e "  ${BOLD}3.${RESET} Application log file  (logs/bot.log)"
+    echo -e "  ${BOLD}4.${RESET} Back"
+    echo ""
+    read -rp "  Please enter a number [1-4]: " LOG_CHOICE
+
+    case "${LOG_CHOICE}" in
+        1)
+            echo -e "  ${CYAN}Press Ctrl+C to exit log view.${RESET}"
+            echo ""
+            journalctl -u "${SERVICE_NAME}" -f --no-pager || true
+            ;;
+        2)
+            echo ""
+            journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
+            pause
+            ;;
+        3)
+            LOG_FILE="${BOT_DIR}/logs/bot.log"
+            if [[ -f "${LOG_FILE}" ]]; then
+                echo -e "  ${CYAN}Press Ctrl+C to exit.${RESET}"
+                echo ""
+                tail -f "${LOG_FILE}" || true
+            else
+                echo -e "  ${YELLOW}Log file not found: ${LOG_FILE}${RESET}"
+                pause
+            fi
+            ;;
+        4)
+            return
+            ;;
+        *)
+            echo -e "  ${RED}Invalid option.${RESET}"
+            sleep 1
+            ;;
+    esac
+}
+
+# ── 10. Config Manager ────────────────────────────────────────────────────────
+
+do_config_manager() {
+    while true; do
+        clear
+        separator
+        echo -e "  ${BOLD}${CYAN}Config Manager${RESET}"
+        separator
+        echo ""
+        echo -e "  ${BOLD}1.${RESET} Edit Bot Token"
+        echo -e "  ${BOLD}2.${RESET} Edit Admin ID"
+        echo -e "  ${BOLD}3.${RESET} Edit Cloudflare API Token"
+        echo -e "  ${BOLD}4.${RESET} Show Current Configuration"
+        echo -e "  ${BOLD}5.${RESET} Back"
+        echo ""
+        read -rp "  Please enter a number [1-5]: " CFG_CHOICE
+
+        case "${CFG_CHOICE}" in
+            1)
+                echo ""
+                read -rp "  Enter new Bot Token: " NEW_VAL
+                NEW_VAL="${NEW_VAL// /}"
+                if [[ -n "${NEW_VAL}" ]]; then
+                    sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${NEW_VAL}|" "${ENV_FILE}"
+                    echo -e "  ${GREEN}✅  Bot Token updated.${RESET}"
+                    systemctl restart "${SERVICE_NAME}" 2>/dev/null && \
+                        echo -e "  ${GREEN}✅  Service restarted.${RESET}" || true
+                else
+                    echo -e "  ${YELLOW}No change — empty value ignored.${RESET}"
+                fi
+                pause
+                ;;
+            2)
+                echo ""
+                read -rp "  Enter new Admin ID (numeric): " NEW_VAL
+                NEW_VAL="${NEW_VAL// /}"
+                if [[ "${NEW_VAL}" =~ ^[0-9]+$ ]]; then
+                    sed -i "s|^ADMIN_ID=.*|ADMIN_ID=${NEW_VAL}|" "${ENV_FILE}"
+                    echo -e "  ${GREEN}✅  Admin ID updated.${RESET}"
+                    systemctl restart "${SERVICE_NAME}" 2>/dev/null && \
+                        echo -e "  ${GREEN}✅  Service restarted.${RESET}" || true
+                else
+                    echo -e "  ${RED}Invalid — Admin ID must be numeric.${RESET}"
+                fi
+                pause
+                ;;
+            3)
+                echo ""
+                read -rp "  Enter new Cloudflare API Token: " NEW_VAL
+                NEW_VAL="${NEW_VAL// /}"
+                if [[ -n "${NEW_VAL}" ]]; then
+                    sed -i "s|^CF_API_TOKEN=.*|CF_API_TOKEN=${NEW_VAL}|" "${ENV_FILE}"
+                    echo -e "  ${GREEN}✅  Cloudflare API Token updated.${RESET}"
+                    systemctl restart "${SERVICE_NAME}" 2>/dev/null && \
+                        echo -e "  ${GREEN}✅  Service restarted.${RESET}" || true
+                else
+                    echo -e "  ${YELLOW}No change — empty value ignored.${RESET}"
+                fi
+                pause
+                ;;
+            4)
+                echo ""
+                separator
+                echo -e "  ${BOLD}Current Configuration${RESET}  (${ENV_FILE})"
+                separator
+                echo ""
+                if [[ -f "${ENV_FILE}" ]]; then
+                    while IFS= read -r line; do
+                        if [[ "${line}" =~ ^([A-Z_]+)=(.*)$ ]]; then
+                            KEY="${BASH_REMATCH[1]}"
+                            VAL="${BASH_REMATCH[2]}"
+                            # Mask token values for security display
+                            if [[ "${KEY}" == *TOKEN* ]]; then
+                                MASKED="${VAL:0:6}$(printf '*%.0s' {1..20})${VAL: -4}"
+                                echo -e "  ${BOLD}${KEY}${RESET} = ${CYAN}${MASKED}${RESET}"
+                            else
+                                echo -e "  ${BOLD}${KEY}${RESET} = ${CYAN}${VAL}${RESET}"
+                            fi
+                        fi
+                    done < "${ENV_FILE}"
+                else
+                    echo -e "  ${RED}Environment file not found: ${ENV_FILE}${RESET}"
+                fi
+                echo ""
+                pause
+                ;;
+            5)
+                break
+                ;;
+            *)
+                echo -e "  ${RED}Invalid option.${RESET}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ── 11. Help ──────────────────────────────────────────────────────────────────
+
+show_help_bot_token() {
+    clear
+    separator
+    echo -e "  ${BOLD}${CYAN}How to create a Telegram Bot Token${RESET}"
+    separator
+    echo ""
+    echo -e "  ${BOLD}1.${RESET}  Open Telegram"
+    echo ""
+    echo -e "  ${BOLD}2.${RESET}  Search for:"
+    echo -e "     ${YELLOW}@BotFather${RESET}"
+    echo ""
+    echo -e "  ${BOLD}3.${RESET}  Send:"
+    echo -e "     ${YELLOW}/newbot${RESET}"
+    echo ""
+    echo -e "  ${BOLD}4.${RESET}  Enter a display name for your bot"
+    echo ""
+    echo -e "  ${BOLD}5.${RESET}  Enter a unique username ending in ${YELLOW}bot${RESET}"
+    echo ""
+    echo -e "  ${BOLD}6.${RESET}  Copy the generated token"
+    echo ""
+    thin_separator
+    echo -e "  ${BOLD}Example:${RESET}"
+    echo -e "  ${GREEN}123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx${RESET}"
+    thin_separator
+    echo ""
+    pause
+}
+
+show_help_admin_id() {
+    clear
+    separator
+    echo -e "  ${BOLD}${CYAN}How to get your Telegram Numeric ID${RESET}"
+    separator
+    echo ""
+    echo -e "  ${BOLD}1.${RESET}  Open Telegram"
+    echo ""
+    echo -e "  ${BOLD}2.${RESET}  Search for:"
+    echo -e "     ${YELLOW}@userinfobot${RESET}"
+    echo ""
+    echo -e "  ${BOLD}3.${RESET}  Press Start"
+    echo ""
+    echo -e "  ${BOLD}4.${RESET}  Send any message"
+    echo ""
+    echo -e "  ${BOLD}5.${RESET}  Copy the ${YELLOW}Id${RESET} value shown in the reply"
+    echo ""
+    thin_separator
+    echo -e "  ${BOLD}Example:${RESET}"
+    echo -e "  ${GREEN}987654321${RESET}"
+    thin_separator
+    echo ""
+    pause
+}
+
+show_help_cf_token() {
+    clear
+    separator
+    echo -e "  ${BOLD}${CYAN}How to create a Cloudflare API Token${RESET}"
+    separator
+    echo ""
+    echo -e "  ${BOLD}1.${RESET}   Login to:"
+    echo -e "      ${YELLOW}https://dash.cloudflare.com${RESET}"
+    echo ""
+    echo -e "  ${BOLD}2.${RESET}   Open:"
+    echo -e "      ${YELLOW}Profile → API Tokens${RESET}"
+    echo ""
+    echo -e "  ${BOLD}3.${RESET}   Click:"
+    echo -e "      ${YELLOW}Create Token${RESET}"
+    echo ""
+    echo -e "  ${BOLD}4.${RESET}   Choose template:"
+    echo -e "      ${YELLOW}Edit zone DNS${RESET}"
+    echo ""
+    echo -e "  ${BOLD}5.${RESET}   Permissions:"
+    echo -e "      ${YELLOW}Zone → DNS → Edit${RESET}"
+    echo -e "      ${YELLOW}Zone → Zone → Read${RESET}"
+    echo ""
+    echo -e "  ${BOLD}6.${RESET}   Zone Resources:"
+    echo -e "      ${YELLOW}All Zones${RESET}  (Recommended)"
+    echo ""
+    echo -e "  ${BOLD}7.${RESET}   Client IP Address Filtering:"
+    echo -e "      ${YELLOW}Leave Empty${RESET}"
+    echo ""
+    echo -e "  ${BOLD}8.${RESET}   Token TTL:"
+    echo -e "      ${YELLOW}No Expiration${RESET}"
+    echo ""
+    echo -e "  ${BOLD}9.${RESET}   Click ${YELLOW}Create Token${RESET} and copy the result"
+    echo ""
+    thin_separator
+    echo -e "  ${BOLD}Example:${RESET}"
+    echo -e "  ${GREEN}abc123XYZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx${RESET}"
+    thin_separator
+    echo ""
+    pause
+}
+
+show_help_paths() {
+    clear
+    separator
+    echo -e "  ${BOLD}${CYAN}Installation Paths${RESET}"
+    separator
+    echo ""
+    echo -e "  ${BOLD}Application:${RESET}"
+    echo -e "  ${CYAN}/usr/local/cdn-manager${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Bot Directory:${RESET}"
+    echo -e "  ${CYAN}/usr/local/cdn-manager/cdn_manager_bot${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Environment File:${RESET}"
+    echo -e "  ${CYAN}/usr/local/cdn-manager/cdn_manager_bot/.env${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Service:${RESET}"
+    echo -e "  ${CYAN}/etc/systemd/system/cdn-manager-bot.service${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Command:${RESET}"
+    echo -e "  ${CYAN}cdn${RESET}  →  ${CYAN}/usr/bin/cdn${RESET}"
+    echo ""
+    pause
+}
+
+do_help() {
+    while true; do
+        clear
+        separator
+        echo -e "  ${BOLD}${CYAN}Help${RESET}"
+        separator
+        echo ""
+        echo -e "  ${BOLD}1.${RESET} How to create Telegram Bot Token"
+        echo -e "  ${BOLD}2.${RESET} How to get Telegram Numeric ID"
+        echo -e "  ${BOLD}3.${RESET} How to create Cloudflare API Token"
+        echo -e "  ${BOLD}4.${RESET} Installation Paths"
+        echo -e "  ${BOLD}5.${RESET} Back"
+        echo ""
+        read -rp "  Please enter a number [1-5]: " HELP_CHOICE
+
+        case "${HELP_CHOICE}" in
+            1) show_help_bot_token ;;
+            2) show_help_admin_id  ;;
+            3) show_help_cf_token  ;;
+            4) show_help_paths     ;;
+            5) break               ;;
+            *) echo -e "  ${RED}Invalid option.${RESET}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+main() {
+    while true; do
+        show_main_menu
+        case "${MAIN_CHOICE}" in
+            0)  echo ""; echo -e "  ${CYAN}Goodbye.${RESET}"; echo ""; exit 0 ;;
+            1)  do_install            ;;
+            2)  do_update             ;;
+            3)  do_install_version    ;;
+            4)  do_uninstall          ;;
+            5)  do_service_manager    ;;
+            6)  do_start              ;;
+            7)  do_stop               ;;
+            8)  do_restart            ;;
+            9)  do_view_logs          ;;
+            10) do_config_manager     ;;
+            11) do_help               ;;
+            *)  echo -e "  ${RED}Invalid option. Please enter a number between 0 and 11.${RESET}"; sleep 1 ;;
+        esac
+    done
+}
+
+main "$@"
